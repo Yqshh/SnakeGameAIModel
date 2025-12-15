@@ -1,113 +1,111 @@
 import os
-import csv
 import random
 from collections import deque
+from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from snake import SnakeGame, Point, Direction
+from snake import SnakeWorld, Cell, Vector
 
-MAX_MEMORY = 20_000
+# Константы
+MEMORY_LIMIT = 20_000
 BATCH_SIZE = 1024
-LR = 0.001
-LOG_FILE = "training_log.csv"
-CHECKPOINT_FILE = "checkpoint.pth"
+LEARNING_RATE = 0.001
+CHECKPOINT = "checkpoint.pth"
 
-class Linear_QNet(nn.Module):
-    def __init__(self, input_size, hidden, output_size):
+# Опыт (для памяти)
+@dataclass
+class Experience:
+    state: np.ndarray
+    action: list[int]
+    reward: float
+    next_state: np.ndarray
+    done: bool
+
+# Модель
+class QNetwork(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int):
         super().__init__()
-        self.linear1 = nn.Linear(input_size, hidden)
-        self.linear2 = nn.Linear(hidden, output_size)
+        self.layers = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, output_dim)
+        )
 
-    def forward(self, x):
-        x = F.relu(self.linear1(x))
-        return self.linear2(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers(x)
 
-class QTrainer:
-    def __init__(self, model, lr, gamma):
+# Тренер
+class Trainer:
+    def __init__(self, model: nn.Module, lr: float, gamma: float):
         self.model = model
         self.optimizer = optim.Adam(model.parameters(), lr=lr)
-        self.criterion = nn.MSELoss()
+        self.loss_fn = nn.MSELoss()
         self.gamma = gamma
 
-    def train_step(self, state, action, reward, next_state, done):
-        state = torch.tensor(np.array(state, dtype=np.float32))
-        next_state = torch.tensor(np.array(next_state, dtype=np.float32))
-        action = torch.tensor(action, dtype=torch.long)
-        reward = torch.tensor(reward, dtype=torch.float32)
+    def train_step(self, states, actions, rewards, next_states, dones):
+        states = torch.tensor(np.array(states, dtype=np.float32))
+        next_states = torch.tensor(np.array(next_states, dtype=np.float32))
+        actions = torch.tensor(actions, dtype=torch.long)
+        rewards = torch.tensor(rewards, dtype=torch.float32)
 
-        if len(state.shape) == 1:
-            state = state.unsqueeze(0)
-            next_state = next_state.unsqueeze(0)
-            action = action.unsqueeze(0)
-            reward = reward.unsqueeze(0)
-            done = (done,)
+        preds = self.model(states)
+        targets = preds.clone()
 
-        pred = self.model(state)
-        target = pred.clone()
-
-        for idx in range(len(done)):
-            q_new = reward[idx]
-            if not done[idx]:
-                q_new = reward[idx] + self.gamma * torch.max(self.model(next_state[idx]))
-            target[idx][torch.argmax(action[idx]).item()] = q_new
+        for i in range(len(dones)):
+            q_val = rewards[i]
+            if not dones[i]:
+                q_val += self.gamma * torch.max(self.model(next_states[i]))
+            targets[i][torch.argmax(actions[i]).item()] = q_val
 
         self.optimizer.zero_grad()
-        loss = self.criterion(pred, target)
+        loss = self.loss_fn(preds, targets)
         loss.backward()
         self.optimizer.step()
 
-class Agent:
+# Агент
+class Learner:
     def __init__(self):
-        self.epsilon = 80
-        self.gamma = 0.9
-        self.memory = deque(maxlen=MAX_MEMORY)
-        self.model = Linear_QNet(11, 256, 3)  # 11 признаков
-        self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
-        self.n_games = 0
+        self.exploration_rate = 80
+        self.discount = 0.9
+        self.memory = deque(maxlen=MEMORY_LIMIT)
+        self.model = QNetwork(11, 3)  # 11 признаков, 3 действия
+        self.trainer = Trainer(self.model, lr=LEARNING_RATE, gamma=self.discount)
+        self.games_played = 0
         self.best_score = 0
         self.scores = []
 
-    def get_state(self, game: SnakeGame):
+    def get_state(self, game: SnakeWorld) -> np.ndarray:
         head = game.head
-        point_l = Point(head.x - 20, head.y)
-        point_r = Point(head.x + 20, head.y)
-        point_u = Point(head.x, head.y - 20)
-        point_d = Point(head.x, head.y + 20)
+        left = Cell(head.x - 20, head.y)
+        right = Cell(head.x + 20, head.y)
+        up = Cell(head.x, head.y - 20)
+        down = Cell(head.x, head.y + 20)
 
-        dir_l = game.direction == Direction.LEFT
-        dir_r = game.direction == Direction.RIGHT
-        dir_u = game.direction == Direction.UP
-        dir_d = game.direction == Direction.DOWN
+        dir_l = game.direction == Vector.LEFT
+        dir_r = game.direction == Vector.RIGHT
+        dir_u = game.direction == Vector.UP
+        dir_d = game.direction == Vector.DOWN
 
         state = [
-            # опасность прямо
-            (dir_r and game._is_collision(point_r)) or
-            (dir_l and game._is_collision(point_l)) or
-            (dir_u and game._is_collision(point_u)) or
-            (dir_d and game._is_collision(point_d)),
+            (dir_r and game._collision(right)) or
+            (dir_l and game._collision(left)) or
+            (dir_u and game._collision(up)) or
+            (dir_d and game._collision(down)),
 
-            # опасность справа
-            (dir_u and game._is_collision(point_r)) or
-            (dir_d and game._is_collision(point_l)) or
-            (dir_l and game._is_collision(point_u)) or
-            (dir_r and game._is_collision(point_d)),
+            (dir_u and game._collision(right)) or
+            (dir_d and game._collision(left)) or
+            (dir_l and game._collision(up)) or
+            (dir_r and game._collision(down)),
 
-            # опасность слева
-            (dir_u and game._is_collision(point_l)) or
-            (dir_d and game._is_collision(point_r)) or
-            (dir_l and game._is_collision(point_d)) or
-            (dir_r and game._is_collision(point_u)),
+            (dir_u and game._collision(left)) or
+            (dir_d and game._collision(right)) or
+            (dir_l and game._collision(down)) or
+            (dir_r and game._collision(up)),
 
-            # направление
-            dir_l,
-            dir_r,
-            dir_u,
-            dir_d,
+            dir_l, dir_r, dir_u, dir_d,
 
-            # положение еды
             game.food.x < head.x,
             game.food.x > head.x,
             game.food.y < head.y,
@@ -115,85 +113,84 @@ class Agent:
         ]
         return np.array(state, dtype=int)
 
-    def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+    def store_experience(self, state, action, reward, next_state, done):
+        self.memory.append(Experience(state, action, reward, next_state, done))
 
-    def train_long_memory(self):
+    def train_batch(self):
         if len(self.memory) > BATCH_SIZE:
-            mini_sample = random.sample(self.memory, BATCH_SIZE)
+            sample = random.sample(self.memory, BATCH_SIZE)
         else:
-            mini_sample = list(self.memory)
-        states, actions, rewards, next_states, dones = zip(*mini_sample)
+            sample = list(self.memory)
+        states, actions, rewards, next_states, dones = zip(*[(e.state, e.action, e.reward, e.next_state, e.done) for e in sample])
         self.trainer.train_step(states, actions, rewards, next_states, dones)
 
-    def train_short_memory(self, state, action, reward, next_state, done):
-        self.trainer.train_step(state, action, reward, next_state, done)
+    def train_single(self, state, action, reward, next_state, done):
+        self.trainer.train_step([state], [action], [reward], [next_state], [done])
 
-    def get_action(self, state):
-        eps = max(5, self.epsilon - self.n_games)
-        final_move = [0, 0, 0]
+    def choose_action(self, state: np.ndarray) -> list[int]:
+        eps = max(5, self.exploration_rate - self.games_played)
+        moves = [0, 0, 0]
         if random.random() < eps / 100.0:
             move = random.randint(0, 2)
         else:
-            state0 = torch.tensor(state, dtype=torch.float32)
-            pred = self.model(state0)
+            state_tensor = torch.tensor(state, dtype=torch.float32)
+            pred = self.model(state_tensor)
             move = torch.argmax(pred).item()
-        final_move[move] = 1
-        return final_move
+        moves[move] = 1
+        return moves
 
-def save_checkpoint(agent):
+# Сохранение/загрузка
+def save_state(agent: Learner):
     checkpoint = {
-        "model_state": agent.model.state_dict(),
-        "optimizer_state": agent.trainer.optimizer.state_dict(),
-        "n_games": agent.n_games,
-        "best_score": agent.best_score,
+        "model": agent.model.state_dict(),
+        "optimizer": agent.trainer.optimizer.state_dict(),
+        "games": agent.games_played,
+        "best": agent.best_score,
         "scores": agent.scores,
-        "epsilon": agent.epsilon,
-        "gamma": agent.gamma,
+        "exploration": agent.exploration_rate,
+        "discount": agent.discount,
         "memory": list(agent.memory),
-        "max_memory": agent.memory.maxlen,
     }
-    torch.save(checkpoint, CHECKPOINT_FILE)
+    torch.save(checkpoint, CHECKPOINT)
 
-def load_checkpoint(agent):
-    if os.path.exists(CHECKPOINT_FILE):
-        checkpoint = torch.load(CHECKPOINT_FILE, map_location="cpu", weights_only=False)
-        agent.model.load_state_dict(checkpoint["model_state"])
-        agent.trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
-        agent.n_games = checkpoint.get("n_games", 0)
-        agent.best_score = checkpoint.get("best_score", 0)
-        agent.scores = checkpoint.get("scores", [])
-        agent.epsilon = checkpoint.get("epsilon", agent.epsilon)
-        agent.gamma = checkpoint.get("gamma", agent.gamma)
-        mem = checkpoint.get("memory", [])
-        maxlen = checkpoint.get("max_memory", agent.memory.maxlen)
-        agent.memory = deque(mem, maxlen=maxlen)
-        print(f"Загружен чекпойнт: игры={agent.n_games}, лучший={agent.best_score}")
+def load_state(agent: Learner):
+    if os.path.exists(CHECKPOINT):
+        data = torch.load(CHECKPOINT, map_location="cpu", weights_only=False)
+        agent.model.load_state_dict(data["model"])
+        agent.trainer.optimizer.load_state_dict(data["optimizer"])
+        agent.games_played = data.get("games", 0)
+        agent.best_score = data.get("best", 0)
+        agent.scores = data.get("scores", [])
+        agent.exploration_rate = data.get("exploration", agent.exploration_rate)
+        agent.discount = data.get("discount", agent.discount)
+        agent.memory = deque(data.get("memory", []), maxlen=MEMORY_LIMIT)
+        print(f"Загружено: игры={agent.games_played}, лучший={agent.best_score}")
 
+# Основной цикл
 def train():
-    agent = Agent()
-    game = SnakeGame()
-    load_checkpoint(agent)
+    agent = Learner()
+    game = SnakeWorld()
+    load_state(agent)
 
     while True:
         state_old = agent.get_state(game)
-        action = agent.get_action(state_old)
-        reward, done, score = game.play_step(action)
+        action = agent.choose_action(state_old)
+        reward, done, score = game.step(action)
         state_new = agent.get_state(game)
 
-        agent.train_short_memory(state_old, action, reward, state_new, done)
-        agent.remember(state_old, action, reward, state_new, done)
+        agent.train_single(state_old, action, reward, state_new, done)
+        agent.store_experience(state_old, action, reward, state_new, done)
 
         if done:
-            game.reset()
-            agent.train_long_memory()
-            agent.n_games += 1
+            game._restart()
+            agent.train_batch()
+            agent.games_played += 1
             agent.scores.append(score)
-            avg_score = sum(agent.scores) / len(agent.scores)
+            avg = sum(agent.scores) / len(agent.scores)
             agent.best_score = max(agent.best_score, score)
 
-            save_checkpoint(agent)
-            print(f"Игра {agent.n_games} | Счёт: {score} | Лучший: {agent.best_score} | Средний: {avg_score:.2f}")
+            save_state(agent)
+            print(f"Игра {agent.games_played} | Счёт: {score} | Лучший: {agent.best_score} | Средний: {avg:.2f}")
 
 if __name__ == "__main__":
     train()
