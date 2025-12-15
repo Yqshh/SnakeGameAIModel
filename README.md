@@ -13,7 +13,7 @@ It uses PyTorch for building and training the model, and pygame for the graphica
 - Сохранение и загрузка чекпойнтов (весов модели, оптимизатора, статистики).
 - GUI-режим для демонстрации игры обученного агента.
 - Логирование результатов обучения.
-- 
+
 ### 🚀 Features
 - Train an agent to play Snake using the ε-greedy strategy.
 - Save and load checkpoints (model weights, optimizer state, training statistics).
