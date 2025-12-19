@@ -15,7 +15,7 @@ COLOR_SNAKE = (0, 200, 0)
 COLOR_FOOD = (200, 0, 0)
 COLOR_TEXT = (255, 255, 255)
 
-@dataclass
+@dataclass(frozen=True)
 class Cell:
     x: int
     y: int
@@ -81,6 +81,25 @@ class SnakeWorld:
         dx, dy = self.direction.value
         self.head = Cell(self.head.x + dx * CELL_SIZE, self.head.y + dy * CELL_SIZE)
 
+    def _free_space(self, point: Cell) -> int:
+        """Flood-fill для оценки количества свободных клеток вокруг головы"""
+        visited = set()
+        stack = [point]
+        while stack:
+            p = stack.pop()
+            if p in visited or p in self.body:
+                continue
+            if p.x < 0 or p.x >= self.width or p.y < 0 or p.y >= self.height:
+                continue
+            visited.add(p)
+            stack.extend([
+                Cell(p.x + CELL_SIZE, p.y),
+                Cell(p.x - CELL_SIZE, p.y),
+                Cell(p.x, p.y + CELL_SIZE),
+                Cell(p.x, p.y - CELL_SIZE),
+            ])
+        return len(visited)
+
     def step(self, action: list[int]):
         self.steps += 1
         dist_before = math.dist((self.head.x, self.head.y), (self.food.x, self.food.y))
@@ -95,16 +114,26 @@ class SnakeWorld:
 
         reward, game_over = 0.0, False
 
+
         if self._collision() or self.steps > 100 * len(self.body):
             return -10.0, True, self.score
 
-        dist_after = math.dist((self.head.x, self.head.y), (self.food.x, self.food.y))
-        reward += 2.0 if dist_after < dist_before else -1.0
-        reward -= 0.1
+        free_space = self._free_space(self.head)
+        if free_space < 10:  # если осталось меньше 10 клеток для движения
+            reward -= 5.0
 
+        # расстояние до еды
+        dist_after = math.dist((self.head.x, self.head.y), (self.food.x, self.food.y))
+        reward += 2.0 if dist_after < dist_before else -0.5
+
+        # шаги
+        reward -= 0.05  # меньше штрафа за движение
+        reward += 0.1  # бонус за выживание
+
+        # еда
         if self.head == self.food:
             self.score += 1
-            reward = 20.0
+            reward = 50.0
             self._spawn_food()
         else:
             self.body.pop()
